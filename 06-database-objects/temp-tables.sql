@@ -1,6 +1,8 @@
-USE chinook;
+-- 06-database-objects / temp-tables.sql
+-- Database: Chinook 
+-- Note: temporary tables only exist for the current session/connection and are automatically dropped when that connection closes.
 
--- Temporary tables are session-scoped and are useful for intermediate results that need to be reused within the same connection.
+USE chinook;
 
 -- Q1: Create a temporary table to hold a filtered snapshot of high-value customers, so it can be queried repeatedly without re-running the full aggregation each time.
 CREATE TEMPORARY TABLE temp_high_value_customers AS
