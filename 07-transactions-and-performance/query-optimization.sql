@@ -1,84 +1,62 @@
 -- 07-transactions-and-performance / query-optimization.sql
 -- Database: Chinook | MySQL 8.0.42
---
--- This file demonstrates common query patterns that can affect performance.
--- Use EXPLAIN to inspect the optimizer's plan, and EXPLAIN ANALYZE when you
--- need to compare estimates with the query's actual execution behavior.
 
 USE chinook;
 
--- Q1: Select only the columns needed by the application.
--- SELECT * may read unnecessary data and can prevent MySQL from using a
--- covering index, even when an appropriate index exists.
+-- Q1: Compare SELECT * against selecting only the columns you actually need — SELECT * reads more data than necessary, and blocks MySQL from using a covering index even if one exists.
 EXPLAIN
 SELECT * FROM invoiceline WHERE InvoiceId = 10;
 
--- This version requests only the required columns. If an index contains all
--- three columns, MySQL may be able to answer the query from the index alone.
 EXPLAIN
 SELECT InvoiceId, UnitPrice, Quantity FROM invoiceline WHERE InvoiceId = 10;
 
 
--- Q2: Keep indexed columns bare in predicates.
--- Applying YEAR() to InvoiceDate requires MySQL to evaluate the function for
--- rows before it can compare the result, which can prevent normal index use.
+-- Q2: Wrapping an indexed column in a function prevents MySQL from using the index on it at all — rewrite to a plain range condition instead, so the index remains usable.
 
--- Slower: a function applied to the indexed column can disable index usage.
+-- Slower: function on the column disables index usage.
 EXPLAIN
 SELECT * FROM invoice WHERE YEAR(InvoiceDate) = 2010;
 
--- Faster: the equivalent half-open range preserves the original column value
--- and includes every timestamp in 2010 without any end-of-day ambiguity.
+-- Faster: a plain range condition lets MySQL use an index on InvoiceDate if one exists.
 EXPLAIN
 SELECT * FROM invoice
 WHERE InvoiceDate >= '2010-01-01' AND InvoiceDate < '2011-01-01';
 
 
--- Q3: Avoid leading wildcards when an index should be used.
--- With '%love%', MySQL does not know the starting characters and cannot seek
--- directly to a portion of a normal sorted index.
+-- Q3: A leading wildcard in LIKE prevents index usage, because MySQL can't use a sorted index to jump to a match if it doesn't know what the string starts with.
 
--- Slower: the leading % generally requires scanning candidate rows.
+-- Slower: leading % means no index can help here.
 EXPLAIN
 SELECT * FROM track WHERE Name LIKE '%love%';
 
--- Faster when applicable: a fixed prefix lets MySQL seek to matching values.
+-- Faster (when applicable): a trailing-only wildcard CAN use an index, since MySQL can jump straight to matching prefixes.
 EXPLAIN
 SELECT * FROM track WHERE Name LIKE 'Love%';
 
 
--- Q4: Compare OR with separate indexed branches.
--- An OR across different columns can make it harder for MySQL to use either
--- index efficiently, although the best choice depends on data and indexes.
-
--- Slower in some data distributions: two different predicates are combined.
+-- Q4: An OR across two different columns often prevents MySQL from using either column's index efficiently — rewriting as a UNION lets each half of the condition use its own index.
+-- - Slower: OR across two different indexed columns.
 EXPLAIN
 SELECT * FROM customer
 WHERE Country = 'India' OR City = 'Mumbai';
-
--- UNION lets MySQL optimize each branch independently. UNION removes duplicate
--- rows, so it may create a temporary result; use UNION ALL only when duplicate
--- rows are known to be impossible or are intentionally wanted.
--- In this schema, Country may be indexed while City is not, so the second
--- branch can still require a scan. Always verify the result with EXPLAIN.
+ 
+-- Faster: UNION lets each condition use its own index separately — though note this only helps the Country side here, since
+-- there's no index on City in this repo (so that half still does a full scan). UNION also builds a temporary table to remove
+-- duplicates, which is its own real cost — worth weighing against the OR version rather than assuming UNION always wins outright.
 EXPLAIN
 SELECT * FROM customer WHERE Country = 'India'
 UNION
 SELECT * FROM customer WHERE City = 'Mumbai';
 
+-- Q5: A correlated subquery re-runs once per outer row — rewriting the same logic as a JOIN often lets MySQL execute it far more efficiently as a single pass.
 
--- Q5: Replace repeated correlated work when a set-based query is equivalent.
--- The correlated subquery is evaluated for each customer, which can become
--- expensive as the outer result grows.
-
--- Slower: count invoices separately for every customer row.
+-- Slower: correlated subquery runs once per customer row.
 EXPLAIN
 SELECT c.CustomerId, c.FirstName,
        (SELECT COUNT(*) FROM invoice AS i WHERE i.CustomerId = c.CustomerId) AS invoice_count
 FROM customer AS c;
 
--- Faster in many cases: join once, aggregate by customer, and preserve
--- customers with no invoices through the LEFT JOIN.
+-- Faster: equivalent result using a JOIN + GROUP BY instead.
 EXPLAIN
 SELECT c.CustomerId, c.FirstName, COUNT(i.InvoiceId) AS invoice_count
 FROM customer AS c
@@ -86,10 +64,7 @@ LEFT JOIN invoice AS i ON c.CustomerId = i.CustomerId
 GROUP BY c.CustomerId, c.FirstName;
 
 
--- Q6: Let an index support ORDER BY ... LIMIT when possible.
--- An index on InvoiceDate can provide rows in the required order, allowing
--- MySQL to stop after finding the first 10 rows instead of sorting everything.
--- Check EXPLAIN for the access type and for an avoidable "Using filesort".
+-- Q6: When using ORDER BY with LIMIT, an index on the sorted column lets MySQL stop early instead of sorting the entire table first — check the plan to see if "Using filesort" appears
 EXPLAIN
 SELECT InvoiceId, InvoiceDate, Total
 FROM invoice
@@ -97,10 +72,7 @@ ORDER BY InvoiceDate DESC
 LIMIT 10;
 
 
--- Q7: Inspect actual execution statistics, not only optimizer estimates.
--- EXPLAIN ANALYZE executes the statement and reports actual row counts and
--- timing, which helps identify inaccurate estimates or an unexpectedly costly
--- join, grouping, or sort. Run it only when executing the query is acceptable.
+-- Q7: Use EXPLAIN ANALYZE (not just EXPLAIN) to see the actual execution statistics — real row counts and real timing, not just MySQL's estimate.
 EXPLAIN ANALYZE
 SELECT c.CustomerId, SUM(i.Total) AS total_spent
 FROM customer AS c
@@ -109,16 +81,14 @@ GROUP BY c.CustomerId
 ORDER BY total_spent DESC;
 
 
--- Q8: Match values to the column's data type.
--- Email is VARCHAR. Comparing it to an unquoted number may force implicit
--- conversion and can prevent the unique Email index from being used normally.
+-- Q8: Comparing a column against a mismatched data type forces MySQL to convert every row before comparing, which silently disables index usage — always match the actual column type.
 
--- Slower: the numeric literal does not match the VARCHAR column type.
+-- - Slower: Email is VARCHAR, but compared against a bare number —forces a type conversion on every row, disabling the unique index on Email entirely.
 EXPLAIN
 SELECT * FROM customer WHERE Email = 12345;
-
--- Faster: the string literal matches the column type and keeps the predicate
--- suitable for normal index lookup.
+ 
+-- Faster: comparing against a properly quoted string lets the
+-- index on Email be used normally.
 EXPLAIN
 SELECT * FROM customer WHERE Email = '12345';
 
